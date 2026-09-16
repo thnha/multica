@@ -172,3 +172,22 @@ If the problem persists, see [Troubleshooting](/troubleshooting).
 - [Install AI coding tools](/install-agent-runtime) — install and verify a supported AI coding tool.
 - [AI coding tools comparison](/providers) — compare models, session resumption, MCP, and skill support.
 - [Runs](/tasks) — queueing, stopping, and retries.
+
+### Muse Code (Meta)
+
+Multica detects the `muse` executable and connects through its native Muse
+Session Protocol (MSP v1), using `muse serve`. Install and authenticate Muse
+Code on the daemon host first. `MULTICA_MUSE_PATH` can override the executable
+and `MULTICA_MUSE_MODEL` can set the default model.
+
+Choose **muse** as the protocol family when creating a custom runtime.
+Models are discovered through MSP; model IDs can also be entered manually.
+Execution supports streaming text and tool
+events, session resume, reasoning effort, and cancellation. Task skills use
+`.agents/skills`; Muse loads the task workspace with `--trust-workspace`.
+Sessions use `allowAll` for unattended tool approvals while retaining Muse's
+default sandbox.
+
+Stable MSP does not expose per-agent MCP configuration or a model-step limit.
+Configure MCP in Muse itself; Multica does not inject `agent.mcp_config`.
+This integration targets the stable schema shipped with Muse Code 1.1.1.

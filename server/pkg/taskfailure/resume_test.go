@@ -234,3 +234,93 @@ func TestAuthMethodUnresolvedMatchesResumeQueryGuard(t *testing.T) {
 		t.Fatalf("predicate does not match the SQL guard phrase %q — pkg/db/queries and pkg/taskfailure have drifted", sqlGuardPhrase)
 	}
 }
+
+// TestMuseResumeIncompatible pins the predicate against the real Muse wording
+// collected from the field. The positive is verbatim from a headless run log;
+// the negatives are the shapes that must keep resuming, because a false
+// positive throws away a healthy conversation.
+func TestMuseResumeIncompatible(t *testing.T) {
+	t.Parallel()
+
+	const verbatim = "provider-private history is incompatible with the active route: " +
+		"reasoning replay `rs_6aa3951653483faddb1b4ec3:rs_01a08efe5e6e7db187b7880d5fb77311` " +
+		"has no provider attribution after a provider switch; " +
+		"start a fresh turn without opaque reasoning history"
+
+	cases := []struct {
+		name   string
+		errMsg string
+		want   bool
+	}{
+		{
+			name:   "verbatim muse replay rejection",
+			errMsg: verbatim,
+			want:   true,
+		},
+		{
+			name:   "case insensitive",
+			errMsg: "Provider-Private History Is Incompatible with the route: no Provider Attribution after switch",
+			want:   true,
+		},
+		{
+			name:   "retained media unsupported by target provider",
+			errMsg: "provider-private history is incompatible with the active route: retained media history is unsupported by target provider muse; remove the media or choose a capable provider",
+			want:   true,
+		},
+		{
+			// "incompatible" alone also matches version-mismatch errors a
+			// retry can survive — resuming must stay allowed for those.
+			name:   "incompatibility verdict alone is not enough",
+			errMsg: "provider-private history is incompatible with the active route: schema v2 required",
+			want:   false,
+		},
+		{
+			// Attribution wording without the incompatibility verdict says
+			// nothing about resumability.
+			name:   "attribution wording alone is not enough",
+			errMsg: "turn skipped: no provider attribution recorded for audit",
+			want:   false,
+		},
+		{
+			name:   "empty error",
+			errMsg: "",
+			want:   false,
+		},
+		{
+			name:   "unrelated provider error",
+			errMsg: "provider.api_error: 429 rate limit exceeded, retry after 30s",
+			want:   false,
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := MuseResumeIncompatible(tt.errMsg); got != tt.want {
+				t.Errorf("MuseResumeIncompatible(%q) = %v, want %v", tt.errMsg, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMuseResumeIncompatibleMatchesResumeQueryGuard asserts the Go predicate
+// and the SQL guards in GetLastTaskSession / GetLastChatTaskSession agree on
+// the phrases. They are two independent implementations of the same rule —
+// the daemon classifier and ResumeUnsafeFailure read this one, and rows
+// written by a daemon too old to have them are caught by the SQL ones — so a
+// drift would leave one layer resuming a session the other considers dead.
+func TestMuseResumeIncompatibleMatchesResumeQueryGuard(t *testing.T) {
+	t.Parallel()
+
+	// The ILIKE patterns the queries apply, minus the wildcards.
+	const sqlGuardPhrase1 = "provider-private history is incompatible"
+	const sqlReasoningGuardPhrase = "no provider attribution"
+	const sqlMediaGuardPhrase = "retained media history is unsupported"
+
+	for _, detail := range []string{sqlReasoningGuardPhrase, sqlMediaGuardPhrase} {
+		if !MuseResumeIncompatible("prefix " + sqlGuardPhrase1 + " middle " + detail + " suffix") {
+			t.Fatalf("predicate does not match the SQL guard phrases %q + %q — pkg/db/queries and pkg/taskfailure have drifted",
+				sqlGuardPhrase1, detail)
+		}
+	}
+}

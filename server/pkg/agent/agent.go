@@ -24,8 +24,9 @@ type Backend interface {
 
 // ExecOptions configures a single execution.
 type ExecOptions struct {
-	Cwd   string
-	Model string
+	Cwd           string
+	Model         string
+	ModelProvider string // provider routing for protocols whose model IDs are not globally unique
 	// SystemPrompt carries the Multica runtime brief for the few providers
 	// that cannot pick it up from disk. The daemon leaves it empty for every
 	// other provider (see daemon.providerNeedsInlineSystemPrompt), because the
@@ -338,7 +339,7 @@ type Config struct {
 // migration 242 to add qoderclicn, migration 253 to add qwenpaw,
 // migration 254 to add reasonix, migration 313 to add dsh, migration 342 to
 // add mcode, migration 370 to add dim, migration 403 to add zeroclaw, and
-// migration 441 to add codearts): a custom runtime profile may
+// migration 441 to add codearts, and migration 457 to add muse): a custom runtime profile may
 // only be based on a backend Multica officially supports.
 // qoder and qoderclicn share the same ACP backend; keeping both provider keys
 // lets the daemon auto-detect and register the international and China-region
@@ -373,6 +374,7 @@ var SupportedTypes = []string{
 	"mcode",
 	"dim",
 	"zeroclaw",
+	"muse",
 }
 
 // IsSupportedType reports whether agentType is in the SupportedTypes whitelist.
@@ -430,6 +432,8 @@ func New(agentType string, cfg Config) (Backend, error) {
 	cfg.LaunchPrefix = filterLaunchPrefix(cfg.LaunchPrefix, agentType, cfg.Logger)
 
 	switch agentType {
+	case "muse":
+		return &museBackend{cfg: cfg}, nil
 	case "claude":
 		return &claudeBackend{cfg: cfg}, nil
 	case "codebuddy":
@@ -500,6 +504,7 @@ func DetectVersion(ctx context.Context, cmd Command) (string, error) {
 // environment variables are deliberately omitted so the string is a hint
 // about *what* users are extending, not a dump of the full command line.
 var launchHeaders = map[string]string{
+	"muse":        "muse serve (MSP)",
 	"antigravity": "agy -p (non-interactive)",
 	"claude":      "claude (stream-json)",
 	"codebuddy":   "codebuddy (stream-json)",

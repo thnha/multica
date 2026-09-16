@@ -214,6 +214,11 @@ but that is documented CLI guidance, not a server-enforced invariant; nothing
 on the create path inspects `custom_args` for a model flag. Provider
 backends may consume protocol selectors before launch:
 
+- Muse Code uses native MSP (`muse serve`). Set `model` and `thinking_level`
+  as first-class fields, not CLI flags. Sessions resume through MSP and task
+  skills are placed in `.agents/skills`. Per-agent MCP injection and max-turn
+  limits are not exposed by stable MSP; configure MCP in Muse itself. Model
+  IDs can be entered manually.
 - Pi filters `--thinking` because the first-class `thinking_level` field owns
   that flag and must be its only source.
 - ZeroClaw consumes `--agent <alias>` / `--agent-alias <alias>` (including

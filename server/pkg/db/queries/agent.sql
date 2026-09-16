@@ -1048,7 +1048,7 @@ RETURNING *;
 -- here so even auto-retry does not inherit the bad session. The daemon
 -- classifies these failures (iteration_limit, agent_fallback_message,
 -- api_invalid_request, codex_semantic_inactivity, agent_error.context_overflow,
--- codex_resume_oversized)
+-- codex_resume_oversized, muse_resume_incompatible)
 -- when it detects either an agent fallback marker in the output, an upstream
 -- API 400 that means the conversation history itself is unprocessable
 -- (oversized image, malformed base64, etc.), a Codex semantic inactivity
@@ -1170,9 +1170,16 @@ WHERE session_id NOT IN (SELECT session_id FROM retired_sessions)
     status IN ('completed', 'cancelled')
     OR (
       status = 'failed'
-      AND COALESCE(failure_reason, '') NOT IN ('iteration_limit', 'agent_fallback_message', 'api_invalid_request', 'codex_semantic_inactivity', 'agent_error.context_overflow', 'codex_resume_oversized')
+      AND COALESCE(failure_reason, '') NOT IN ('iteration_limit', 'agent_fallback_message', 'api_invalid_request', 'codex_semantic_inactivity', 'agent_error.context_overflow', 'codex_resume_oversized', 'muse_resume_incompatible')
       AND NOT (COALESCE(error, '') ILIKE '%400%' AND COALESCE(error, '') ILIKE '%invalid_request_error%')
       AND NOT (COALESCE(error, '') ILIKE '%image dimensions exceed max allowed size%' AND COALESCE(error, '') ILIKE '%image.source.base64.data%')
+      -- Mirrors the ResumeUnsafeFailure text guard: a Muse session whose
+      -- opaque reasoning history the runtime refuses to replay fails
+      -- deterministically on resume, and rows an older daemon wrote as
+      -- agent_error.unknown carry no failure_reason for the list above to
+      -- match. The phrase lives in taskfailure.MuseResumeIncompatible.
+      -- Keep in sync with ResumeUnsafeFailure and GetLastChatTaskSession.
+      AND NOT (COALESCE(error, '') ILIKE '%provider-private history is incompatible%' AND (COALESCE(error, '') ILIKE '%no provider attribution%' OR COALESCE(error, '') ILIKE '%retained media history is unsupported%'))
       -- A provider credential-resolution failure ("Could not resolve
       -- authentication method...") is deterministic on resume: the missing
       -- api_key / auth_token / header is baked into the session's provider

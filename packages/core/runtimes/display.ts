@@ -41,6 +41,7 @@ export function runtimeDisplayLabel(
  * first-letter capitalization of its slug on both sides. Keep in sync with the daemon map.
  */
 const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+  muse: "Muse Code",
   codearts: "CodeArts",
   dsh: "DeepSeek Harness",
   qoderclicn: "Qoder CN",

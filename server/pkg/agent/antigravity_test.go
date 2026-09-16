@@ -44,8 +44,9 @@ func TestBuildAntigravityArgsBasic(t *testing.T) {
 func TestBuildAntigravityArgsModel(t *testing.T) {
 	t.Parallel()
 
-	// agy 1.0.6's --model takes the exact human display string (spaces +
-	// parens), not a slug. It must ride as a single argv element so no shell
+	// agy 1.0.6's --model takes either the slug or the human display string
+	// (spaces + parens) — buildAntigravityArgs passes opts.Model through
+	// verbatim either way. It must ride as a single argv element so no shell
 	// quoting is required, and it must sit before the user's custom args.
 	args := buildAntigravityArgs(
 		"hello",
@@ -476,13 +477,25 @@ func TestAntigravityModelError(t *testing.T) {
 	t.Parallel()
 
 	catalog := []Model{
-		{ID: "Gemini 3.5 Flash (Medium)", Label: "Gemini 3.5 Flash (Medium)", Provider: "antigravity"},
-		{ID: "Claude Opus 4.6 (Thinking)", Label: "Claude Opus 4.6 (Thinking)", Provider: "antigravity"},
+		{ID: "gemini-3.5-flash-medium", Label: "Gemini 3.5 Flash (Medium)", Provider: "antigravity"},
+		{ID: "claude-opus-4-6-thinking", Label: "Claude Opus 4.6 (Thinking)", Provider: "antigravity"},
 	}
 
-	// Exact catalog hit → accepted.
+	// Exact catalog hit by label → accepted.
 	if err := antigravityModelError("Claude Opus 4.6 (Thinking)", catalog); err != nil {
-		t.Errorf("valid model rejected: %v", err)
+		t.Errorf("valid model (label) rejected: %v", err)
+	}
+
+	// Exact catalog hit by slug → accepted.
+	if err := antigravityModelError("claude-opus-4-6-thinking", catalog); err != nil {
+		t.Errorf("valid model (slug) rejected: %v", err)
+	}
+
+	// VIB-24 regression: the combined "slug\tlabel" line `agy models` prints
+	// is not a value anyone should set and real agy rejects it too — it must
+	// stay rejected even though it's built from two valid catalog fields.
+	if err := antigravityModelError("claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)", catalog); err == nil {
+		t.Error("combined slug+tab+label should be rejected, not treated as a valid catalog entry")
 	}
 
 	// Empty model → accepted (flag omitted, agy resolves its own default).

@@ -53,6 +53,10 @@ func thinkingCatalogs() map[string]agent.Catalog {
 		}},
 	}
 	return map[string]agent.Catalog{
+		"muse": {Models: []agent.Model{{
+			ID:       "muse-spark-1.3",
+			Provider: "meta",
+		}}},
 		"pi":       {Models: []agent.Model{gatewayOpus}},
 		"opencode": {Models: []agent.Model{gatewayOpus}},
 		"omp":      {Models: []agent.Model{gatewayOpus}},
@@ -87,6 +91,13 @@ func TestResolveTaskModelSelectionReadsTheCatalogAtMostOnce(t *testing.T) {
 		want      taskModelSelection
 		wantReads int
 	}{
+		{
+			name:      "muse resolves provider routing for an explicit model",
+			provider:  "muse",
+			in:        taskModelSelection{Model: "muse-spark-1.3"},
+			want:      taskModelSelection{Model: "muse-spark-1.3", ModelProvider: "meta"},
+			wantReads: 1,
+		},
 		{
 			// The reporter's exact configuration. One read serves both the
 			// selector promotion and the thinking-level check; before the fix

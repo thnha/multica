@@ -5198,7 +5198,10 @@ func resumeUnsafeFailureReason(reason string) bool {
 	// codex_resume_oversized is the strongest member of this set: a codex
 	// rollout only ever grows, so a thread whose resume response already
 	// overflowed the reader will overflow on every future attempt too.
-	case "iteration_limit", "agent_fallback_message", "api_invalid_request", "codex_semantic_inactivity", "agent_error.context_overflow", "codex_resume_oversized":
+	// muse_resume_incompatible is its Muse analogue: opaque reasoning history
+	// recorded under another provider is replayed on every resume, so only a
+	// fresh session recovers.
+	case "iteration_limit", "agent_fallback_message", "api_invalid_request", "codex_semantic_inactivity", "agent_error.context_overflow", "codex_resume_oversized", "muse_resume_incompatible":
 		return true
 	default:
 		return false
@@ -5245,7 +5248,17 @@ func ResumeUnsafeFailure(failureReason, errorText string) bool {
 	// a daemon too old to carry classifyPoisonedError's new branch reports
 	// agent_error.unknown, and without this the manual-retry path would
 	// happily resume the transcript the provider just refused (GH #6066).
-	return taskfailure.UnresumableHistory(errorText)
+	if taskfailure.UnresumableHistory(errorText) {
+		return true
+	}
+	// Same defense-in-depth for a Muse session whose reasoning history the
+	// runtime refuses to replay: rows written as agent_error.unknown by a
+	// daemon without classifyResumeUnsafeMuseHistory would otherwise keep
+	// the manual-retry path resuming the exact session the provider just
+	// refused. The phrase lives in taskfailure.MuseResumeIncompatible,
+	// shared with the daemon classifier so the two layers cannot disagree
+	// about which errors mean "this session can never be resumed".
+	return taskfailure.MuseResumeIncompatible(errorText)
 }
 
 // retryEligible reports whether a failed task qualifies for an automatic retry

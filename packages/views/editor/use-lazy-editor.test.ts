@@ -31,7 +31,7 @@ describe("useLazyEditor", () => {
     expect(result.current.active).toBe(true);
   });
 
-  it("queues uploads against the stand-in and flushes them on ready", () => {
+  it("queues uploads against the stand-in and flushes them on ready", async () => {
     const handle = makeHandle();
     const editorRef = { current: handle as LazyEditorHandle };
     const { result } = renderHook(() => useLazyEditor({ editorRef }));
@@ -42,7 +42,9 @@ describe("useLazyEditor", () => {
     expect(result.current.active).toBe(true);
     expect(handle.uploadFile).not.toHaveBeenCalled();
 
-    act(() => result.current.onReady());
+    await act(async () => {
+      result.current.onReady();
+    });
     expect(handle.uploadFile).toHaveBeenCalledWith(file);
   });
 

@@ -75,6 +75,40 @@ func AuthMethodUnresolved(errText string) bool {
 // with %v rather than replacing it.
 const authMethodUnresolvedPhrase = "could not resolve authentication method"
 
+// MuseResumeIncompatible reports whether an agent error is the Muse runtime
+// refusing history that is private to a different route. That can be opaque
+// reasoning with no provider attribution, or retained media that the selected
+// provider cannot consume. Every resume reproduces the same rejection.
+//
+// Deliberately provider-agnostic text matching (the daemon gates on the
+// provider separately): the two markers together describe the defect, not a
+// transient condition. Either marker alone is too loose — "incompatible"
+// appears in version-mismatch errors that a retry can survive, and
+// "no provider attribution" without the incompatibility verdict says nothing
+// about resumability.
+func MuseResumeIncompatible(errText string) bool {
+	if errText == "" {
+		return false
+	}
+	lowered := strings.ToLower(errText)
+	return strings.Contains(lowered, museResumeIncompatiblePhrase) &&
+		(strings.Contains(lowered, museNoAttributionPhrase) ||
+			strings.Contains(lowered, museRetainedMediaUnsupportedPhrase))
+}
+
+// museResumeIncompatiblePhrase and museNoAttributionPhrase are the lowercase
+// markers MuseResumeIncompatible matches. Observed verbatim on a Muse
+// headless run whose session outlived a provider switch:
+//
+//	provider-private history is incompatible with the active route:
+//	reasoning replay `rs_...` has no provider attribution after a provider
+//	switch; start a fresh turn without opaque reasoning history
+const museResumeIncompatiblePhrase = "provider-private history is incompatible"
+
+const museNoAttributionPhrase = "no provider attribution"
+
+const museRetainedMediaUnsupportedPhrase = "retained media history is unsupported"
+
 // emptyContentRe matches the provider's complaint that a content field is
 // empty, in the wordings observed across providers.
 var emptyContentRe = regexp.MustCompile(`(?i)must not be empty|must be non-?empty|must have non-?empty|non-?empty content|cannot be empty|should not be empty`)

@@ -698,7 +698,7 @@ func antigravityModelError(model string, available []Model) error {
 	}
 	ids := make([]string, 0, len(available))
 	for _, m := range available {
-		if m.ID == model {
+		if m.ID == model || m.Label == model {
 			return nil
 		}
 		ids = append(ids, m.ID)

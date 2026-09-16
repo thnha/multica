@@ -63,6 +63,13 @@ describe("runtimeDisplayLabel", () => {
   });
 
   it("uses the daemon's provider display name for overridden slugs", () => {
+    expect(
+      runtimeDisplayLabel({
+        name: "Muse Code (host)",
+        custom_name: "box",
+        provider: "muse",
+      }),
+    ).toBe("box (Muse Code)");
     // CodeArts, DSH, Qoder CN, Trae, Qwen Code, and QwenPaw use display names that differ from
     // title-cased slugs; aliases must match the daemon's no-alias names.
     expect(

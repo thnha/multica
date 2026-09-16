@@ -332,6 +332,8 @@ func skillsDirPath(workDir, provider string) string {
 		return filepath.Join(workDir, desc.SkillsDir)
 	}
 	switch provider {
+	case "muse":
+		return filepath.Join(workDir, ".agents", "skills")
 	case "claude":
 		// Claude Code natively discovers skills from .claude/skills/ in the workdir.
 		return filepath.Join(workDir, ".claude", "skills")

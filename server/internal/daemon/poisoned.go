@@ -29,6 +29,10 @@ import (
 //   - Transport-side: a Codex thread/resume response too large to read back.
 //     The thread only grows, so every later resume overflows identically.
 //     Detected via classifyResumeUnsafeTransport.
+//   - History-side (Muse): the runtime refuses to replay a resumed session's
+//     opaque reasoning history after a provider switch. The history is baked
+//     into the session, so every resume reproduces the rejection and only a
+//     fresh session recovers. Detected via classifyResumeUnsafeMuseHistory.
 //
 // MUL-2946: ReasonIterationLimit and ReasonAPIInvalidRequest are aliased
 // to the canonical taskfailure values so the daemon and the in-flight
@@ -43,6 +47,7 @@ const (
 	FailureReasonAPIInvalidRequest       = string(taskfailure.ReasonAPIInvalidRequest)
 	FailureReasonCodexSemanticInactivity = "codex_semantic_inactivity"
 	FailureReasonCodexResumeOversized    = "codex_resume_oversized"
+	FailureReasonMuseResumeIncompatible  = "muse_resume_incompatible"
 )
 
 // poisonedOutputMaxLen caps how long an output can be and still be
@@ -204,6 +209,32 @@ func classifyResumeUnsafeTransport(provider, errMsg string) (string, bool) {
 // session should not be resumed. Keep this intentionally provider-specific:
 // ordinary daemon/backend timeouts are infrastructure-shaped and should keep
 // the resume pointer so retries can continue the in-flight conversation.
+// classifyResumeUnsafeMuseHistory reports whether a Muse failure means the
+// recorded session must not be resumed again.
+//
+// The one case today is a resumed session whose opaque reasoning history was
+// recorded under a different provider: the runtime rejects the replay with
+// "provider-private history is incompatible ... no provider attribution",
+// and that rejection is baked into the session — every future resume replays
+// the same history and fails identically, while a fresh session has nothing
+// to replay and succeeds. Classifying it keeps the NEXT task off that
+// session even when the current one could not be saved (the in-turn
+// fresh-session retry is gated on tools == 0, and a resume that dies after
+// its first tool call lands here instead).
+//
+// Provider-specific on purpose, exactly like classifyResumeUnsafeTransport:
+// the phrases describe Muse's reasoning-replay verdict, and for other
+// backends similar words would be a coincidence, not a diagnosis.
+func classifyResumeUnsafeMuseHistory(provider, errMsg string) (string, bool) {
+	if strings.ToLower(strings.TrimSpace(provider)) != "muse" || errMsg == "" {
+		return "", false
+	}
+	if taskfailure.MuseResumeIncompatible(errMsg) {
+		return FailureReasonMuseResumeIncompatible, true
+	}
+	return "", false
+}
+
 func classifyResumeUnsafeTimeout(provider, errMsg string) (string, bool) {
 	if strings.ToLower(strings.TrimSpace(provider)) != "codex" || errMsg == "" {
 		return "", false

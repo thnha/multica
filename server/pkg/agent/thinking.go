@@ -672,6 +672,10 @@ func ValidateThinkingLevel(ctx context.Context, providerType string, cmd Command
 // (#3729, MUL-5549), so each read costs the ceiling again on a logged-out or
 // timing-out runtime (MUL-6471 review).
 func ValidateThinkingLevelWith(loadCatalog func() (Catalog, error), providerType, model, value string) (bool, error) {
+	// Stable MSP defines a closed turn-level vocabulary, independent of model discovery.
+	if providerType == "muse" {
+		return IsKnownThinkingValue(providerType, value), nil
+	}
 	if value == "" {
 		return true, nil
 	}
@@ -847,6 +851,7 @@ func anyModelSupportsThinkingValue(models []Model, value string) bool {
 // Keep fixed-provider lists permissive: this is a provider-universe check,
 // not an "is this right for this model" check.
 var providerThinkingEnums = map[string]map[string]bool{
+	"muse": {"none": true, "minimal": true, "low": true, "medium": true, "high": true, "xhigh": true, "max": true, "ultra": true},
 	"claude": {
 		"low":    true,
 		"medium": true,

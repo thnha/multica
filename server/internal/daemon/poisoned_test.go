@@ -389,3 +389,90 @@ func TestClassifyResumeUnsafeTimeout(t *testing.T) {
 		})
 	}
 }
+
+func TestClassifyResumeUnsafeMuseHistory(t *testing.T) {
+	// The exact string the Muse backend produces when a resumed session's
+	// opaque reasoning history was recorded under another provider.
+	const replayErr = "provider-private history is incompatible with the active route: " +
+		"reasoning replay `rs_6aa3951653483faddb1b4ec3:rs_01a08efe5e6e7db187b7880d5fb77311` " +
+		"has no provider attribution after a provider switch; " +
+		"start a fresh turn without opaque reasoning history"
+
+	cases := []struct {
+		name       string
+		provider   string
+		errMsg     string
+		wantOK     bool
+		wantReason string
+	}{
+		{
+			name:       "muse reasoning replay rejection",
+			provider:   "muse",
+			errMsg:     replayErr,
+			wantOK:     true,
+			wantReason: FailureReasonMuseResumeIncompatible,
+		},
+		{
+			name:       "muse retained media route rejection",
+			provider:   "muse",
+			errMsg:     "provider-private history is incompatible with the active route: retained media history is unsupported by target provider muse; remove the media or choose a capable provider",
+			wantOK:     true,
+			wantReason: FailureReasonMuseResumeIncompatible,
+		},
+		{
+			// Only the incompatibility verdict without the attribution
+			// marker is not the replay defect — resuming stays allowed.
+			name:     "verdict without attribution marker stays resumable",
+			provider: "muse",
+			errMsg:   "provider-private history is incompatible with the active route: schema v2 required",
+			wantOK:   false,
+		},
+		{
+			// An ordinary Muse failure says nothing about the session:
+			// dropping the resume pointer would discard a healthy thread.
+			name:     "plain muse failure stays resumable",
+			provider: "muse",
+			errMsg:   "muse process exited with status 1",
+			wantOK:   false,
+		},
+		{
+			// Only Muse emits this verdict; for other backends the same
+			// words would be a coincidence, not a diagnosis.
+			name:     "other provider same text is not classified",
+			provider: "claude",
+			errMsg:   replayErr,
+			wantOK:   false,
+		},
+		{
+			name:     "empty error",
+			provider: "muse",
+			errMsg:   "",
+			wantOK:   false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reason, ok := classifyResumeUnsafeMuseHistory(tc.provider, tc.errMsg)
+			if ok != tc.wantOK {
+				t.Fatalf("classifyResumeUnsafeMuseHistory(%q, %q) ok=%v, want %v", tc.provider, tc.errMsg, ok, tc.wantOK)
+			}
+			if ok && reason != tc.wantReason {
+				t.Fatalf("classifyResumeUnsafeMuseHistory(%q, %q) reason=%q, want %q", tc.provider, tc.errMsg, reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestMuseResumeIncompatibleIsResumeUnsafe pins the cross-package contract
+// that makes the classifier above worth anything: classifying the failure
+// only helps if the retry path actually treats the reason as unsafe.
+func TestMuseResumeIncompatibleIsResumeUnsafe(t *testing.T) {
+	if !service.ResumeUnsafeFailure(FailureReasonMuseResumeIncompatible, "") {
+		t.Fatalf("ResumeUnsafeFailure(%q) = false, want true — the reason is classified but the session would still be resumed",
+			FailureReasonMuseResumeIncompatible)
+	}
+	if !service.ResumeUnsafeFailure("agent_error.unknown", "provider-private history is incompatible after switch: no provider attribution") {
+		t.Fatalf("ResumeUnsafeFailure with the Muse replay text = false, want true — legacy rows would keep resuming the dead session")
+	}
+}

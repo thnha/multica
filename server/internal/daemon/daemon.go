@@ -6393,6 +6393,7 @@ func taskRootDirParams(workspacesRoot string, task Task) execenv.RootDirParams {
 // descriptor.
 var runtimeDisplayNameOverrides = map[string]string{
 	"codearts":   "CodeArts",
+	"muse":       "Muse Code",
 	"dsh":        "DeepSeek Harness",
 	"traecli":    "Trae",
 	"grok":       "Grok",
@@ -7416,6 +7417,7 @@ func skillRefFromBundle(bundle SkillData) SkillRefData {
 // selector plus the capability overrides that survived validation.
 type taskModelSelection struct {
 	Model         string
+	ModelProvider string
 	ThinkingLevel string
 	ServiceTier   string
 }
@@ -7469,6 +7471,19 @@ func resolveTaskModelSelection(
 	}
 
 	sel.Model = qualifyTaskModel(provider, sel.Model, capabilityChecksPending, loadCatalog, taskLog)
+	if provider == "muse" && sel.Model != "" && sel.ModelProvider == "" {
+		if catalog, err := loadCatalog(); err != nil {
+			taskLog.Warn("model provider: catalog lookup failed; leaving routing to Muse",
+				"provider", provider, "model", sel.Model, "error", err)
+		} else {
+			for _, candidate := range catalog.Models {
+				if candidate.ID == sel.Model && candidate.Provider != "" {
+					sel.ModelProvider = candidate.Provider
+					break
+				}
+			}
+		}
+	}
 
 	// service_tier is catalog-owned and currently Codex-only. As with
 	// thinking_level, stale or incompatible persisted values degrade to the
@@ -8573,6 +8588,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	execOpts := agent.ExecOptions{
 		Cwd:                        env.WorkDir,
 		Model:                      model,
+		ModelProvider:              selection.ModelProvider,
 		ThreadName:                 deriveTaskThreadName(task),
 		Timeout:                    d.cfg.AgentTimeout,
 		SemanticInactivityTimeout:  d.cfg.CodexSemanticInactivityTimeout,
@@ -8952,6 +8968,16 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 				// is still retired rather than silently kept.
 				retiredSessionID = task.PriorSessionID
 			}
+		}
+		if failureReason == "" {
+			// A Muse resume rejected for incompatible reasoning history
+			// names its session (unlike the Codex overflow above), so the
+			// per-session latest-state filter in GetLastTaskSession is
+			// enough to keep the NEXT task off it — no retired id needed.
+			// This is the live path, not belt-and-braces: the in-turn
+			// retry is gated on tools == 0, and a resume that dies after
+			// its first tool call can only be saved here.
+			failureReason, _ = classifyResumeUnsafeMuseHistory(provider, errMsg)
 		}
 		if failureReason != "" {
 			taskLog.Warn("agent failed with a resume-unsafe error, retiring the session",

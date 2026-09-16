@@ -138,8 +138,12 @@ export function useLazyEditor({
       focusAtTarget(target);
     }
     const pending = pendingFilesRef.current;
-    pendingFilesRef.current = [];
-    for (const file of pending) editorRef.current?.uploadFile?.(file);
+    if (pending.length > 0) {
+      pendingFilesRef.current = [];
+      queueMicrotask(() => {
+        for (const file of pending) editorRef.current?.uploadFile?.(file);
+      });
+    }
   }, [ready, editorRef, focusAtTarget]);
 
   /** Upload now when the editor is live; otherwise queue and summon it. */
