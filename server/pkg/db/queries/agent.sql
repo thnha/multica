@@ -968,6 +968,7 @@ WHERE id = $1
 RETURNING *;
 
 -- name: StartAgentTask :one
+-- Legacy single-winner transition; generation-aware callers lock the claim first.
 -- Transitions a task to running. Accepts either 'dispatched' (the normal
 -- claim → run flow) or 'waiting_local_directory' (the daemon held the row in
 -- a wait state while another task owned the local_directory path lock; once
@@ -979,8 +980,16 @@ SET status = 'running',
     started_at = now(),
     wait_reason = NULL,
     prepare_lease_expires_at = NULL
-WHERE id = $1 AND status IN ('dispatched', 'waiting_local_directory')
+WHERE agent_task_queue.id = $1 AND agent_task_queue.status IN ('dispatched', 'waiting_local_directory')
 RETURNING *;
+
+-- name: LockAgentTaskStartClaim :one
+-- Serialize start/replay with reclaim and cancellation. A stale delivery must
+-- never start or acknowledge a newer claim, even on the same runtime.
+SELECT * FROM agent_task_queue
+WHERE id = $1 AND runtime_id = $2 AND dispatched_at = $3
+  AND status IN ('dispatched', 'waiting_local_directory', 'running')
+FOR UPDATE;
 
 -- name: MarkAgentTaskWaitingLocalDirectory :one
 -- Transitions a freshly-dispatched task into 'waiting_local_directory' while
@@ -1781,6 +1790,11 @@ WHERE agent_id = $1 AND status IN ('dispatched', 'running', 'waiting_local_direc
 SELECT * FROM agent
 WHERE id = $1
 FOR UPDATE;
+
+-- name: HasTaskForIssue :one
+-- Returns true if the issue has any task in any status. Webhook recovery
+-- treats even a terminal task as proof that ownership moved downstream.
+SELECT EXISTS (SELECT 1 FROM agent_task_queue WHERE issue_id = $1);
 
 -- name: HasActiveTaskForIssue :one
 -- Returns true if there is any queued, dispatched, waiting_local_directory,
