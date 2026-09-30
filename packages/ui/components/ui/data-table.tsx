@@ -32,6 +32,12 @@ import { cn } from "@multica/ui/lib/utils";
 // header behave alike, and keeps a plain click from committing a width.
 const RESIZE_DRAG_THRESHOLD = 4;
 
+// Extra per-row presentation: a class and data attributes for the standard
+// data row (custom rows from `renderRow` carry their own).
+export type DataTableRowProps = {
+  className?: string;
+} & { [attribute: `data-${string}`]: string | undefined };
+
 interface DataTableProps<TData> extends React.ComponentProps<"div"> {
   table: TanstackTable<TData>;
   // Optional bar shown below the table when ≥1 row is selected. We
@@ -51,6 +57,8 @@ interface DataTableProps<TData> extends React.ComponentProps<"div"> {
   // Optional escape hatch for semantic rows such as collapsible group
   // headers. Return null/undefined to use the standard data row renderer.
   renderRow?: (row: Row<TData>) => React.ReactNode;
+  // Marks a standard data row, e.g. the one a side panel is showing.
+  getRowProps?: (row: Row<TData>) => DataTableRowProps | undefined;
   // A caller-supplied <tfoot> (summary / quick-create rows, for example).
   footer?: React.ReactNode;
   // Render only the visible row window for large tables. Callers should use
@@ -84,6 +92,7 @@ export function DataTable<TData>({
   emptyMessage = "No results.",
   onRowClick,
   renderRow,
+  getRowProps,
   footer,
   virtualizeRows = false,
   virtualRowHeight = 41,
@@ -373,6 +382,7 @@ export function DataTable<TData>({
     emptyMessage,
     onRowClick,
     renderRow,
+    getRowProps,
     hasExplicitSize,
     measureRow: rowVirtualizer.measureElement,
     virtualizeRows,
@@ -587,6 +597,7 @@ interface DataTableBodyProps<TData> {
   emptyMessage: React.ReactNode;
   onRowClick?: (row: Row<TData>, event: React.MouseEvent) => void;
   renderRow?: (row: Row<TData>) => React.ReactNode;
+  getRowProps?: (row: Row<TData>) => DataTableRowProps | undefined;
   hasExplicitSize: (columnId: string) => boolean;
   // The virtualizer's own measuring ref; rows report their height through it.
   measureRow: (element: HTMLElement | null) => void;
@@ -602,6 +613,7 @@ function DataTableBody<TData>({
   emptyMessage,
   onRowClick,
   renderRow,
+  getRowProps,
   hasExplicitSize,
   measureRow,
   virtualizeRows,
@@ -628,9 +640,11 @@ function DataTableBody<TData>({
           )
         : <React.Fragment key={row.id}>{customRow}</React.Fragment>;
     }
+    const { className: rowClassName, ...rowAttributes } = getRowProps?.(row) ?? {};
     return (
       <TableRow
         key={row.id}
+        {...rowAttributes}
         {...measured}
         data-state={row.getIsSelected() && "selected"}
         onClick={
@@ -655,7 +669,7 @@ function DataTableBody<TData>({
         // `group` lets pinned cells track row hover via group-hover (their bg
         // is in className, not on the row, so they stay opaque enough to cover
         // content scrolling beneath them).
-        className={cn("group", onRowClick && "cursor-pointer")}
+        className={cn("group", onRowClick && "cursor-pointer", rowClassName)}
       >
         {row.getVisibleCells().map((cell) => {
           const isPinned = cell.column.getIsPinned();

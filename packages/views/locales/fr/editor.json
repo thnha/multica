@@ -40,6 +40,9 @@
     "delete": "Supprimer",
     "link_copied": "Lien copié",
     "copy_link_failed": "Échec de la copie du lien",
+    "copy_image": "Copier l'image",
+    "image_copied": "Image copiée",
+    "copy_image_failed": "Impossible de copier l'image",
     "canvas_label": "Zone d'image. Faites glisser pour déplacer, faites défiler pour zoomer, double-cliquez pour basculer en taille réelle.",
     "unavailable": "Cette image n'est plus disponible — elle a été ignorée."
   },
@@ -85,7 +88,10 @@
     "table_rows_one": "{{count}} ligne",
     "table_rows_other": "{{count}} lignes",
     "table_columns_one": "{{count}} colonne",
-    "table_columns_other": "{{count}} colonnes"
+    "table_columns_other": "{{count}} colonnes",
+    "address": "Adresse",
+    "address_hint": "?paramètres",
+    "reload": "Actualiser"
   },
   "link_hover": {
     "copy_link": "Copier le lien",

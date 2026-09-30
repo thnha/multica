@@ -1149,6 +1149,74 @@ describe("IssueDetail (shared)", () => {
     expect(screen.queryByText("Properties")).not.toBeInTheDocument();
   });
 
+  // The peek's close button lives in the host's trailing controls, so every
+  // state the peek can show must carry them (review of #8886).
+  function renderPeek(issueId = "issue-1") {
+    const queryClient = createTestQueryClient();
+    return render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <QueryClientProvider client={queryClient}>
+          <IssueDetail
+            issueId={issueId}
+            variant="peek"
+            onDelete={() => {}}
+            leadingAction={<span data-testid="peek-nav" />}
+            trailingActions={<button type="button">Close preview</button>}
+          />
+        </QueryClientProvider>
+      </I18nProvider>,
+    );
+  }
+
+  it("keeps the peek's host controls while the issue is loading", () => {
+    mockApiObj.getIssue.mockReturnValue(new Promise(() => {}));
+    renderPeek();
+    expect(screen.getByTestId("peek-nav")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close preview" })).toBeInTheDocument();
+  });
+
+  it("keeps the peek's host controls when the issue cannot be loaded", async () => {
+    mockApiObj.getIssue.mockRejectedValue(new Error("Not found"));
+    renderPeek("nonexistent-id");
+    await waitFor(() => {
+      expect(
+        screen.getByText("This issue does not exist or has been deleted in this workspace."),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: "Close preview" })).toBeInTheDocument();
+  });
+
+  it("renders the peek variant as one column with property pills and host actions", async () => {
+    const queryClient = createTestQueryClient();
+    render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <QueryClientProvider client={queryClient}>
+          <IssueDetail
+            issueId="issue-1"
+            variant="peek"
+            leadingAction={<span data-testid="peek-nav" />}
+            trailingActions={<button type="button">Close preview</button>}
+          />
+        </QueryClientProvider>
+      </I18nProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Implement authentication")).toBeInTheDocument();
+    });
+
+    // No resizable sidebar: the properties become pills under the title.
+    expect(screen.queryByTestId("panel-group")).not.toBeInTheDocument();
+    expect(screen.queryByText("Properties")).not.toBeInTheDocument();
+    expect(screen.getByTestId("project-picker")).toBeInTheDocument();
+    expect(screen.getByText("High")).toBeInTheDocument();
+    // The host's controls replace the sidebar toggle.
+    expect(screen.getByTestId("peek-nav")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close preview" })).toBeInTheDocument();
+    // The header leaf names the issue by identifier only — the title is right below.
+    expect(screen.getByRole("link", { name: mockIssue.identifier })).toBeInTheDocument();
+  });
+
   it("pins the comment composer to the scroll viewport on a wide screen", async () => {
     const { container } = renderIssueDetail();
 
@@ -1613,7 +1681,12 @@ describe("IssueDetail (shared)", () => {
       expect(within(slot).getByText("Cancelled by the system")).toBeInTheDocument();
       expect(within(slot).queryByText("task cancelled by server")).not.toBeInTheDocument();
       expect(within(slot).queryByText("Failed")).not.toBeInTheDocument();
-      expect(screen.getAllByRole("button", { name: "Retry run" })).toHaveLength(1);
+      // Once in the timeline. The sidebar's execution log lists the latest
+      // runs with their own row actions, which is a separate surface.
+      const timelineRetries = screen
+        .getAllByRole("button", { name: "Retry run" })
+        .filter((button) => !button.closest(".\\@container\\/execution-log"));
+      expect(timelineRetries).toHaveLength(1);
     };
 
     it("renders the run block in the notice's thread slot and retries that run", async () => {
@@ -1998,6 +2071,8 @@ describe("IssueDetail (shared)", () => {
     expect(screen.getByText(/set this issue to keep its status when PRs merge/i)).toBeInTheDocument();
   });
 
+  // MUL-7680: the child-done system rule's comment is the woken agent's
+  // instruction; people read one timeline line that can reveal it.
   it("renders activity rows with unknown status values without crashing", async () => {
     mockApiObj.listTimeline.mockResolvedValue([
       {

@@ -40,6 +40,9 @@
     "delete": "删除",
     "link_copied": "已复制链接",
     "copy_link_failed": "复制链接失败",
+    "copy_image": "复制图片",
+    "image_copied": "已复制图片",
+    "copy_image_failed": "无法复制图片",
     "canvas_label": "图片画布,拖动可平移,滚动可缩放,双击可切换实际大小。",
     "unavailable": "这张图片已失效,已跳过。"
   },
@@ -81,7 +84,10 @@
     "tree_keys_other": "{{count}} 个键",
     "table_empty": "没有数据行",
     "table_rows_other": "{{count}} 行",
-    "table_columns_other": "{{count}} 列"
+    "table_columns_other": "{{count}} 列",
+    "address": "地址",
+    "address_hint": "?参数",
+    "reload": "刷新"
   },
   "link_hover": {
     "copy_link": "复制链接",

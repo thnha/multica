@@ -40,6 +40,9 @@
     "delete": "삭제",
     "link_copied": "링크를 복사했습니다",
     "copy_link_failed": "링크를 복사하지 못했습니다",
+    "copy_image": "이미지 복사",
+    "image_copied": "이미지를 복사했습니다",
+    "copy_image_failed": "이미지를 복사하지 못했습니다",
     "canvas_label": "이미지 캔버스. 드래그하여 이동, 스크롤하여 확대/축소, 두 번 클릭하여 실제 크기로 전환할 수 있습니다.",
     "unavailable": "이 이미지를 불러올 수 없어 건너뛰었습니다."
   },
@@ -81,7 +84,10 @@
     "tree_keys_other": "키 {{count}}개",
     "table_empty": "행이 없습니다",
     "table_rows_other": "{{count}}행",
-    "table_columns_other": "{{count}}열"
+    "table_columns_other": "{{count}}열",
+    "address": "주소",
+    "address_hint": "?매개변수",
+    "reload": "새로고침"
   },
   "link_hover": {
     "copy_link": "링크 복사",

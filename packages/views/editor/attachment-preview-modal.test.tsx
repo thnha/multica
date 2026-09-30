@@ -4,11 +4,28 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState, type ReactElement } from "react";
 import type { Attachment } from "@multica/core/types";
 
-const openExternalMock = vi.hoisted(() => vi.fn());
+const { openExternalMock, isDesktopShellMock, copyImageMock, toastMock } =
+  vi.hoisted(() => ({
+    openExternalMock: vi.fn(),
+    // Web by default; the copy-image tests flip it to the desktop shell.
+    isDesktopShellMock: vi.fn(() => false),
+    copyImageMock: vi.fn(async (_url: string) => true),
+    toastMock: { success: vi.fn(), error: vi.fn() },
+  }));
 
 vi.mock("../platform", () => ({
   openExternal: openExternalMock,
 }));
+
+vi.mock("../platform/local-directory", () => ({
+  isDesktopShell: isDesktopShellMock,
+}));
+
+vi.mock("@multica/ui/lib/clipboard", () => ({
+  copyImage: copyImageMock,
+}));
+
+vi.mock("sonner", () => ({ toast: toastMock }));
 
 // vi.hoisted: factories run before module evaluation, letting us name mocks
 // referenced from inside vi.mock factories below. The Error classes must be
@@ -108,6 +125,9 @@ vi.mock("../i18n", () => ({
       sel({
         image: {
           download: "Download",
+          copy_image: "Copy image",
+          image_copied: "Image copied",
+          copy_image_failed: "Couldn't copy image",
           canvas_label: "Image canvas",
         },
         canvas: {
@@ -143,6 +163,9 @@ vi.mock("../i18n", () => ({
           table_empty: "No rows",
           table_rows: "rows",
           table_columns: "columns",
+          address: "Address",
+          address_hint: "?query",
+          reload: "Reload",
         },
       }),
   }),
@@ -152,6 +175,8 @@ import {
   AttachmentPreviewModal,
   useAttachmentPreview,
 } from "./attachment-preview-modal";
+import { withFragmentNavShim } from "./utils/iframe-fragment-nav";
+import { withLocationBridge } from "./utils/iframe-location-bridge";
 import { renderHook, act as hookAct } from "@testing-library/react";
 
 // Fresh QueryClient per render — no retries (preview errors are typed,
@@ -202,6 +227,8 @@ beforeEach(() => {
   getAttachmentTextContentMock.mockReset();
   navState.hasOpenInNewTab = true;
   slugState.value = "acme";
+  isDesktopShellMock.mockReturnValue(false);
+  copyImageMock.mockResolvedValue(true);
   // Default to web's same-origin empty base so existing absolute-URL tests
   // remain unaffected by the relative-URL resolution added in normalize().
   getBaseUrlMock.mockReturnValue("");
@@ -308,12 +335,75 @@ describe("AttachmentPreviewModal — dispatch", () => {
       // (MUL-2330). The combination with `allow-same-origin` would defeat
       // the sandbox, so this assertion must stay exact.
       expect(frame?.getAttribute("sandbox")).toBe("allow-scripts");
-      // srcdoc carries the original HTML plus the fragment-nav shim
-      // appended at the end (see utils/iframe-fragment-nav.ts).
-      const srcdoc = frame?.getAttribute("srcdoc") ?? "";
-      expect(srcdoc.startsWith("<p>hi</p>")).toBe(true);
-      expect(srcdoc).toContain("scrollIntoView");
+      // srcdoc carries the original HTML between the address bridge in
+      // front (utils/iframe-location-bridge.ts) and the fragment-nav shim
+      // appended at the end (utils/iframe-fragment-nav.ts).
+      expect(frame?.getAttribute("srcdoc")).toBe(
+        withLocationBridge(withFragmentNavShim("<p>hi</p>"), ""),
+      );
     });
+  });
+
+  it("loads the HTML at the address typed into its address bar", async () => {
+    getAttachmentTextContentMock.mockResolvedValueOnce({
+      text: "<p>hi</p>",
+      originalContentType: "text/html",
+    });
+    const att = makeAttachment({ filename: "mock.html", content_type: "text/html" });
+    render(<AttachmentPreviewModal source={{ kind: "full", attachment: att }} open onClose={() => {}} />);
+
+    const input = await screen.findByLabelText("Address");
+    fireEvent.change(input, { target: { value: "mock.html?s=overview" } });
+    fireEvent.submit(input.closest("form")!);
+
+    const frame = document.querySelector("iframe[sandbox]") as HTMLIFrameElement;
+    expect(frame.getAttribute("srcdoc")).toBe(
+      withLocationBridge(withFragmentNavShim("<p>hi</p>"), "?s=overview"),
+    );
+    expect((input as HTMLInputElement).value).toBe("?s=overview");
+  });
+
+  it("keeps the HTML's address across the source view", async () => {
+    getAttachmentTextContentMock.mockResolvedValueOnce({
+      text: "<p>hi</p>",
+      originalContentType: "text/html",
+    });
+    const att = makeAttachment({ filename: "mock.html", content_type: "text/html" });
+    render(<AttachmentPreviewModal source={{ kind: "full", attachment: att }} open onClose={() => {}} />);
+
+    const input = await screen.findByLabelText("Address");
+    fireEvent.change(input, { target: { value: "?s=ia" } });
+    fireEvent.submit(input.closest("form")!);
+    fireEvent.click(screen.getByRole("button", { name: "View source" }));
+    // The source is the file, not a page: no address, nothing to reload.
+    expect(screen.queryByLabelText("Address")).toBeNull();
+    expect(screen.getByText("mock.html", { selector: "p" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Reload" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "View source" }));
+
+    expect(screen.getByLabelText("Address")).toHaveValue("?s=ia");
+    expect(document.querySelector("iframe[sandbox]")?.getAttribute("srcdoc")).toBe(
+      withLocationBridge(withFragmentNavShim("<p>hi</p>"), "?s=ia"),
+    );
+  });
+
+  it("drops an unsubmitted address on Escape without closing the viewer", async () => {
+    getAttachmentTextContentMock.mockResolvedValueOnce({
+      text: "<p>hi</p>",
+      originalContentType: "text/html",
+    });
+    const att = makeAttachment({ filename: "mock.html", content_type: "text/html" });
+    render(<ClosablePreview attachment={att} />);
+
+    const input = (await screen.findByLabelText("Address")) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "?s=draft" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(input.value).toBe("");
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    // With nothing left to drop, Escape closes the viewer as usual.
+    fireEvent.keyDown(input, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   it("renders a code block with lowlight for source files", async () => {
@@ -594,6 +684,50 @@ describe("AttachmentPreviewModal — controls", () => {
   });
 });
 
+describe("AttachmentPreviewModal — copy image (MUL-7759)", () => {
+  const image = () =>
+    makeAttachment({
+      filename: "screenshot.png",
+      content_type: "image/png",
+      download_url: "https://cdn.example.test/screenshot.png?Signature=s",
+    });
+
+  it("copies the image on screen from the desktop shell", async () => {
+    isDesktopShellMock.mockReturnValue(true);
+    render(<AttachmentPreviewModal source={{ kind: "full", attachment: image() }} open onClose={() => {}} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy image" }));
+
+    expect(copyImageMock).toHaveBeenCalledWith(
+      "https://cdn.example.test/screenshot.png?Signature=s",
+    );
+    await waitFor(() => expect(toastMock.success).toHaveBeenCalledWith("Image copied"));
+  });
+
+  it("says so when the copy fails", async () => {
+    isDesktopShellMock.mockReturnValue(true);
+    copyImageMock.mockResolvedValue(false);
+    render(<AttachmentPreviewModal source={{ kind: "full", attachment: image() }} open onClose={() => {}} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy image" }));
+
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith("Couldn't copy image"));
+    expect(toastMock.success).not.toHaveBeenCalled();
+  });
+
+  it("offers no copy button on web, where the storage CDN can't be read from script", () => {
+    render(<AttachmentPreviewModal source={{ kind: "full", attachment: image() }} open onClose={() => {}} />);
+    expect(screen.queryByRole("button", { name: "Copy image" })).toBeNull();
+  });
+
+  it("offers no copy button for files that aren't images", () => {
+    isDesktopShellMock.mockReturnValue(true);
+    const pdf = makeAttachment({ filename: "manual.pdf", content_type: "application/pdf" });
+    render(<AttachmentPreviewModal source={{ kind: "full", attachment: pdf }} open onClose={() => {}} />);
+    expect(screen.queryByRole("button", { name: "Copy image" })).toBeNull();
+  });
+});
+
 describe("AttachmentPreviewModal — URL-only source", () => {
   it("renders a PDF iframe from the URL when no attachment record is available", () => {
     const url = "https://cdn.example.test/orphan.pdf?Signature=s";
@@ -710,6 +844,33 @@ describe("AttachmentPreviewModal — open-in-new-tab", () => {
       { activate: true },
     );
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the new tab at the address the HTML is at", async () => {
+    getAttachmentTextContentMock.mockResolvedValueOnce({
+      text: "<p>hi</p>",
+      originalContentType: "text/html",
+    });
+    const att = makeAttachment({
+      filename: "report.html",
+      content_type: "text/html",
+    });
+    render(
+      <AttachmentPreviewModal
+        source={{ kind: "full", attachment: att }}
+        open
+        onClose={() => {}}
+      />,
+    );
+    const input = await screen.findByLabelText("Address");
+    fireEvent.change(input, { target: { value: "?s=ia#top" } });
+    fireEvent.submit(input.closest("form")!);
+    fireEvent.click(screen.getByTitle("Open in new tab"));
+    expect(openInNewTabMock).toHaveBeenCalledWith(
+      "/acme/attachments/att-1/preview?name=report.html&loc=%3Fs%3Dia%23top",
+      "report.html",
+      { activate: true },
+    );
   });
 
   it("falls back to window.open against the shareable URL and closes the modal (web)", async () => {
