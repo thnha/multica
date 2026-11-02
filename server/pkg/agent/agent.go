@@ -411,7 +411,6 @@ var SupportedTypes = []string{
 	"dim",
 	"devin",
 	"zeroclaw",
-	"muse",
 }
 
 // IsSupportedType reports whether agentType is in the SupportedTypes whitelist.
@@ -469,8 +468,6 @@ func New(agentType string, cfg Config) (Backend, error) {
 	cfg.LaunchPrefix = filterLaunchPrefix(cfg.LaunchPrefix, agentType, cfg.Logger)
 
 	switch agentType {
-	case "muse":
-		return &museBackend{cfg: cfg}, nil
 	case "claude":
 		return &claudeBackend{cfg: cfg}, nil
 	case "codebuddy":
@@ -545,7 +542,6 @@ func DetectVersion(ctx context.Context, cmd Command) (string, error) {
 // environment variables are deliberately omitted so the string is a hint
 // about *what* users are extending, not a dump of the full command line.
 var launchHeaders = map[string]string{
-	"muse":        "muse serve (MSP)",
 	"antigravity": "agy -p (non-interactive)",
 	"claude":      "claude (stream-json)",
 	"codebuddy":   "codebuddy (stream-json)",

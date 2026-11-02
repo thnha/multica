@@ -444,7 +444,6 @@ func isASCIIAlpha(ch byte) bool {
 // Only families that reject flags at all appear here; a family whose backend
 // has no blocked-arg policy accepts any prefix.
 var launchPrefixBlockedArgs = map[string]map[string]blockedArgMode{
-	"muse":        museBlockedArgs,
 	"antigravity": antigravityBlockedArgs,
 	"claude":      claudeBlockedArgs,
 	"codebuddy":   codebuddyBlockedArgs,
