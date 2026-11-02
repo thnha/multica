@@ -1,412 +1,295 @@
 package agent
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
+	"log/slog"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 )
 
-type museTestWriteCloser struct{ bytes.Buffer }
+const fakeMuseSessionID = "01a14870-5a2f-7791-b847-2385a5d47a8c"
 
-func (*museTestWriteCloser) Close() error { return nil }
+// writeFakeMuseServe writes a stand-in for `muse serve` that answers MSP on
+// stdio. It records every request line and its argv so a test can assert on the
+// protocol conversation instead of on timing.
+func writeFakeMuseServe(t *testing.T, resumeError bool) (bin, requests, args string) {
+	t.Helper()
+	dir := t.TempDir()
+	bin = filepath.Join(dir, "muse")
+	requests = filepath.Join(dir, "requests.jsonl")
+	args = filepath.Join(dir, "args.txt")
 
-// The helper implements the stable MSP surface exported by Muse Code 1.1.1.
-// It deliberately sends events before the turn/start acknowledgement.
-func runMuseTestHelper() {
-	scenario := os.Getenv("MUSE_MSP_TEST_HELPER")
-	wantArgs := "serve --trust-workspace --sandbox-network enabled"
-	if scenario == "network-policy" {
-		wantArgs = "serve --trust-workspace --sandbox-network enabled --extra"
+	resumeBranch := `    *'"method":"session/resume"'*)
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"session":{"sessionId":"SESSION_ID"}}}\n' "$id"
+      ;;`
+	if resumeError {
+		resumeBranch = `    *'"method":"session/resume"'*)
+      printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32001,"message":"session not found","data":{"kind":"notFound"}}}\n' "$id"
+      ;;`
 	}
-	if strings.Join(os.Args[1:], " ") != wantArgs && !(scenario == "models" && strings.Join(os.Args[1:], " ") == "serve") {
-		os.Exit(10)
+
+	script := `#!/bin/sh
+printf '%s\n' "$*" > ARGS_PATH
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> REQUESTS_PATH
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"serverInfo":{"name":"muse","version":"1.4.10"},"schema":{"version":1}}}\n' "$id"
+      ;;
+RESUME_BRANCH
+    *'"method":"session/start"'*)
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"session":{"sessionId":"SESSION_ID"},"viewCursor":"v1"}}\n' "$id"
+      ;;
+    *'"method":"session/setApprovalMode"'*)
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"sessionId":"SESSION_ID","mode":"allowAll"}}\n' "$id"
+      ;;
+    *'"method":"session/setModel"'*)
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"sessionId":"SESSION_ID","modelId":"new-model"}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"startedNewTurn":true,"disposition":"started"}}\n' "$id"
+      sleep 0.02
+      printf '{"jsonrpc":"2.0","method":"turn/started","params":{"sessionId":"SESSION_ID","turnId":"turn-1"}}\n'
+      printf '{"jsonrpc":"2.0","method":"item/started","params":{"sessionId":"SESSION_ID","item":{"itemId":"tool-1","kind":"toolCall","status":"inProgress","tool":"shell","callId":"call-1","args":%s}}}\n' '{}'
+      printf '{"jsonrpc":"2.0","method":"item/completed","params":{"sessionId":"SESSION_ID","item":{"itemId":"tool-1","kind":"toolCall","status":"completed","tool":"shell","callId":"call-1","visibleOutput":"a.txt"}}}\n'
+      printf '{"jsonrpc":"2.0","method":"item/started","params":{"sessionId":"SESSION_ID","item":{"itemId":"msg-1","kind":"agentMessage","status":"inProgress"}}}\n'
+      printf '{"jsonrpc":"2.0","method":"item/delta","params":{"sessionId":"SESSION_ID","itemId":"msg-1","field":"text","delta":"Muse "}}\n'
+      printf '{"jsonrpc":"2.0","method":"item/delta","params":{"sessionId":"SESSION_ID","itemId":"msg-1","field":"text","delta":"finished"}}\n'
+      printf '{"jsonrpc":"2.0","method":"item/completed","params":{"sessionId":"SESSION_ID","item":{"itemId":"msg-1","kind":"agentMessage","status":"completed","messagePhase":"finalAnswer","text":"Muse finished"}}}\n'
+      printf '{"jsonrpc":"2.0","method":"session/tokenUsage","params":{"sessionId":"SESSION_ID","modelId":"muse-wonder-full-1.0","usage":{"inputTokens":120,"outputTokens":8,"cacheReadTokens":20,"cacheWriteTokens":0}}}\n'
+      printf '{"jsonrpc":"2.0","method":"turn/completed","params":{"sessionId":"SESSION_ID","turnId":"turn-1","terminal":"completed","durationMs":12}}\n'
+      ;;
+    *)
+      printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32601,"message":"method not found"}}\n' "$id"
+      ;;
+  esac
+done
+`
+
+	script = strings.ReplaceAll(script, "ARGS_PATH", args)
+	script = strings.ReplaceAll(script, "REQUESTS_PATH", requests)
+	script = strings.ReplaceAll(script, "RESUME_BRANCH", resumeBranch)
+	script = strings.ReplaceAll(script, "SESSION_ID", fakeMuseSessionID)
+
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake muse: %v", err)
 	}
-	scan := bufio.NewScanner(os.Stdin)
-	scan.Buffer(make([]byte, 4096), 4<<20)
-	send := func(v any) {
-		if json.NewEncoder(os.Stdout).Encode(v) != nil {
-			os.Exit(11)
-		}
+	return bin, requests, args
+}
+
+func readMuseRequests(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read recorded requests: %v", err)
 	}
-	sessionID := "01991eaa-0000-7000-8000-000000000001"
-	turnID := ""
-	approvalDecisions := 0
-	emitCompletedTurn := func(notify func(string, map[string]any)) {
-		notify("turn/completed", map[string]any{"turnId": "old-turn", "terminal": "completed"})
-		notify("item/started", map[string]any{"item": map[string]any{"itemId": "a", "turnId": turnID, "kind": "agentMessage", "status": "inProgress", "revision": 1}})
-		notify("item/delta", map[string]any{"itemId": "a", "delta": "ok"})
-		notify("item/completed", map[string]any{"item": map[string]any{"itemId": "a", "turnId": turnID, "kind": "agentMessage", "status": "completed", "revision": 2, "text": "okay"}})
-		notify("item/completed", map[string]any{"item": map[string]any{"itemId": "tool", "turnId": turnID, "kind": "toolCall", "status": "completed", "revision": 1, "tool": "read_file", "args": "{\"path\":\"a\"}", "visibleOutput": "data"}})
-		notify("turn/completed", map[string]any{"turnId": turnID, "terminal": "completed", "error": map[string]any{"message": "model failed"}, "usage": map[string]any{"inputTokens": 12, "outputTokens": 3}})
-	}
-	for scan.Scan() {
-		var f struct {
-			ID     int            `json:"id"`
-			Method string         `json:"method"`
-			Params map[string]any `json:"params"`
-		}
-		if json.Unmarshal(scan.Bytes(), &f) != nil {
-			os.Exit(12)
-		}
-		result := any(map[string]any{})
-		notify := func(method string, params map[string]any) {
-			params["sessionId"] = sessionID
-			send(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
-		}
-		switch f.Method {
-		case "model/list":
-			result = map[string]any{"models": []any{map[string]any{"modelId": "muse-test", "displayLabel": "Muse Test", "providerId": "meta", "isDefault": true}}}
-		case "initialize":
-			if scenario == "handshake-timeout" {
-				continue
-			}
-			result = map[string]any{"schema": map[string]any{"version": 1}}
-		case "initialized":
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line == "" {
 			continue
-		case "session/start", "session/resume":
-			if scenario == "resume-missing" || scenario == "resume-auth" {
-				kind := "sessionNotFound"
-				if scenario == "resume-auth" {
-					kind = "commandRejected"
-				}
-				send(map[string]any{"jsonrpc": "2.0", "id": f.ID, "error": map[string]any{"code": -32000, "message": "cannot resume", "data": map[string]any{"kind": kind}}})
-				continue
-			}
-			if f.Method == "session/resume" && f.Params["excludeItems"] != true {
-				os.Exit(13)
-			}
-			if f.Method == "session/start" && f.Params["modelId"] != nil && f.Params["modelId"] != "test-model" {
-				os.Exit(20)
-			}
-			if f.Method == "session/start" && f.Params["modelId"] != nil && f.Params["providerId"] != "meta" {
-				os.Exit(21)
-			}
-			session := map[string]any{"sessionId": sessionID, "modelId": "test-model", "status": "idle", "activeTurnId": nil}
-			if scenario == "resume-busy" {
-				session["status"] = "running"
-				session["activeTurnId"] = "old-turn"
-			}
-			if scenario == "resume-wrong" {
-				session["sessionId"] = "wrong-session"
-			}
-			result = map[string]any{"session": session}
-		case "session/setApprovalMode":
-			if f.Params["mode"] != "allowAll" {
-				os.Exit(16)
-			}
-			result = map[string]any{"status": "accepted"}
-		case "approval/decide":
-			if (scenario != "approval" && scenario != "approval-multi" && scenario != "approval-duplicate-update" && scenario != "approval-already-resolved") || f.Params["choiceId"] != "approvedForSession" {
-				os.Exit(19)
-			}
-			approvalDecisions++
-			if scenario == "approval-duplicate-update" && approvalDecisions > 1 {
-				send(map[string]any{"jsonrpc": "2.0", "id": f.ID, "error": map[string]any{"code": -32051, "message": "approval approval-1 is already resolved", "data": map[string]any{"kind": "approvalAlreadyResolved"}}})
-				continue
-			}
-			if scenario == "approval-already-resolved" {
-				send(map[string]any{"jsonrpc": "2.0", "id": f.ID, "error": map[string]any{"code": -32051, "message": "approval approval-1 is already resolved", "data": map[string]any{"kind": "approvalAlreadyResolved"}}})
-				emitCompletedTurn(notify)
-				continue
-			}
-			terminal := scenario == "approval" || approvalDecisions == 2
-			if scenario == "approval-duplicate-update" {
-				terminal = true
-			}
-			result = map[string]any{"status": "accepted", "approvalId": "approval-1", "commandId": f.Params["commandId"], "terminal": terminal}
-			if scenario == "approval-multi" && approvalDecisions == 1 {
-				send(map[string]any{"jsonrpc": "2.0", "id": f.ID, "result": result})
-				notify("approval/updated", map[string]any{
-					"approvalId":           "approval-1",
-					"currentRequirementId": map[string]any{"approvalId": "approval-1", "sourceIndex": 6},
-					"availableChoices": []any{
-						map[string]any{"choiceId": "approvedForSession", "decision": "approvedForSession", "scope": "session"},
-						map[string]any{"choiceId": "denied", "decision": "denied", "scope": "once"},
-					},
-				})
-				continue
-			}
-			if scenario == "approval-multi" {
-				emitCompletedTurn(notify)
-			}
-			if scenario == "approval-duplicate-update" {
-				send(map[string]any{"jsonrpc": "2.0", "id": f.ID, "result": result})
-				notify("approval/updated", map[string]any{
-					"approvalId":           "approval-1",
-					"currentRequirementId": map[string]any{"approvalId": "approval-1", "sourceIndex": 2},
-					"availableChoices": []any{
-						map[string]any{"choiceId": "approvedForSession", "decision": "approvedForSession", "scope": "session"},
-					},
-				})
-				emitCompletedTurn(notify)
-				continue
-			}
-		case "session/setModel":
-			model, _ := f.Params["model"].(map[string]any)
-			if model["modelId"] != "test-model" || model["providerId"] != "meta" {
-				os.Exit(22)
-			}
-			result = map[string]any{"status": "accepted"}
-		case "turn/start":
-			if f.Params["ifBusy"] != "queue" {
-				os.Exit(17)
-			}
-			turnID, _ = f.Params["commandId"].(string)
-			if scenario == "approval" || scenario == "approval-multi" || scenario == "approval-duplicate-update" || scenario == "approval-already-resolved" {
-				notify("approval/requested", map[string]any{
-					"approvalId":           "approval-1",
-					"sessionId":            sessionID,
-					"currentRequirementId": map[string]any{"approvalId": "approval-1", "sourceIndex": 2},
-					"availableChoices": []any{
-						map[string]any{"choiceId": "approvedForSession", "decision": "approvedForSession", "scope": "session"},
-						map[string]any{"choiceId": "denied", "decision": "denied", "scope": "once"},
-					},
-				})
-				result = map[string]any{"turnId": turnID, "status": "accepted", "disposition": "started"}
-				if scenario == "approval-multi" || scenario == "approval-duplicate-update" || scenario == "approval-already-resolved" {
-					send(map[string]any{"jsonrpc": "2.0", "id": f.ID, "result": result})
-					continue
-				}
-			}
-			parts, _ := f.Params["input"].([]any)
-			if len(parts) != 1 || parts[0].(map[string]any)["text"] != "hello\nworld" {
-				os.Exit(14)
-			}
-			if scenario == "eof" {
-				return
-			}
-			if scenario == "malformed" {
-				fmt.Println("not json")
-				return
-			}
-			notify("turn/completed", map[string]any{"turnId": "old-turn", "terminal": "completed"})
-			notify("item/started", map[string]any{"item": map[string]any{"itemId": "a", "turnId": turnID, "kind": "agentMessage", "status": "inProgress", "revision": 1}})
-			notify("item/delta", map[string]any{"itemId": "a", "delta": "ok"})
-			notify("item/completed", map[string]any{"item": map[string]any{"itemId": "a", "turnId": turnID, "kind": "agentMessage", "status": "completed", "revision": 2, "text": "okay"}})
-			notify("item/completed", map[string]any{"item": map[string]any{"itemId": "tool", "turnId": turnID, "kind": "toolCall", "status": "completed", "revision": 1, "tool": "read_file", "args": "{\"path\":\"a\"}", "visibleOutput": "data"}})
-			result = map[string]any{"turnId": turnID, "status": "accepted", "disposition": "started"}
-			if scenario != "cancel" {
-				terminal := "completed"
-				if scenario == "failed" {
-					terminal = "failed"
-				}
-				notify("turn/completed", map[string]any{"turnId": turnID, "terminal": terminal, "error": map[string]any{"message": "model failed"}, "usage": map[string]any{"inputTokens": 12, "outputTokens": 3}})
-			}
-		case "turn/interrupt":
-			send(map[string]any{"jsonrpc": "2.0", "id": f.ID, "result": map[string]any{"status": "accepted", "turnId": turnID}})
-			time.Sleep(50 * time.Millisecond)
-			if err := os.WriteFile(os.Getenv("MULTICA_MUSE_CANCEL_MARKER"), []byte("settled"), 0600); err != nil {
-				os.Exit(18)
-			}
-			notify("turn/completed", map[string]any{"turnId": turnID, "terminal": "cancelled"})
-			continue
-		default:
-			os.Exit(15)
 		}
-		send(map[string]any{"jsonrpc": "2.0", "id": f.ID, "result": result})
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("recorded request is not JSON: %v", err)
+		}
+		out = append(out, entry)
 	}
+	return out
 }
 
-func TestMuseMSPExecution(t *testing.T) {
-	for _, scenario := range []string{"success", "resume", "approval", "approval-multi", "approval-duplicate-update", "approval-already-resolved", "resume-missing", "resume-auth", "resume-busy", "resume-wrong", "handshake-timeout", "eof", "malformed", "failed", "cancel"} {
-		t.Run(scenario, func(t *testing.T) {
-			self, err := os.Executable()
-			if err != nil {
-				t.Fatal(err)
-			}
-			marker := t.TempDir() + "/cancelled"
-			backend, err := New("muse", Config{ExecutablePath: self, Env: map[string]string{"MUSE_MSP_TEST_HELPER": scenario, "MULTICA_MUSE_CANCEL_MARKER": marker}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-			defer cancel()
-			opts := ExecOptions{Cwd: t.TempDir(), Model: "test-model", ModelProvider: "meta", ThinkingLevel: "high", TurnInterruptTimeout: 300 * time.Millisecond}
-			if scenario == "handshake-timeout" {
-				opts.HandshakeTimeout = 50 * time.Millisecond
-			}
-			if strings.HasPrefix(scenario, "resume") {
-				opts.ResumeSessionID = "01991eaa-0000-7000-8000-000000000001"
-			}
-			s, err := backend.Execute(ctx, "hello\nworld", opts)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var text string
-			var tools, results int
-			for m := range s.Messages {
-				if m.Type == MessageText {
-					text += m.Content
-					if scenario == "cancel" {
-						cancel()
-					}
-				}
-				if m.Type == MessageToolUse {
-					tools++
-				}
-				if m.Type == MessageToolResult {
-					results++
-				}
-			}
-			r := <-s.Result
-			if scenario == "cancel" {
-				if _, err := os.Stat(marker); err != nil {
-					t.Fatal("Muse killed before cancellation settled")
-				}
-			}
-			want := "failed"
-			if scenario == "success" || scenario == "resume" || scenario == "approval" || scenario == "approval-multi" || scenario == "approval-duplicate-update" || scenario == "approval-already-resolved" {
-				want = "completed"
-			}
-			if scenario == "cancel" {
-				want = "cancelled"
-			}
-			if r.Status != want {
-				t.Fatalf("result = %+v, want %s", r, want)
-			}
-			if want == "completed" && (r.Output != "okay" || text != "okay" || tools != 1 || results != 1 || r.Usage["test-model"].InputTokens != 12) {
-				t.Fatalf("result=%+v text=%q tools=%d results=%d", r, text, tools, results)
-			}
-			if r.ResumeRejectedTransient != (scenario == "resume-busy") {
-				t.Fatalf("transient resume classification = %+v", r)
-			}
-			if r.ResumeRejected != (scenario == "resume-missing") {
-				t.Fatalf("resume classification = %+v", r)
-			}
-		})
+func museRequestByMethod(requests []map[string]any, method string) map[string]any {
+	for _, entry := range requests {
+		if entry["method"] == method {
+			return entry
+		}
 	}
+	return nil
 }
 
-func TestMuseNestedApprovalPreservesOuterRPCResponse(t *testing.T) {
-	c := &museClient{
-		stdin:  &museTestWriteCloser{},
-		frames: make(chan museRead, 3),
-	}
-	approvalParams, err := json.Marshal(map[string]any{
-		"approvalId":           "approval-1",
-		"sessionId":            "session-1",
-		"currentRequirementId": map[string]any{"approvalId": "approval-1", "sourceIndex": 2},
-		"availableChoices": []any{
-			map[string]any{"choiceId": "approvedForSession", "decision": "approvedForSession", "scope": "session"},
-		},
+func newFakeMuseBackend(t *testing.T, bin string) Backend {
+	t.Helper()
+	backend, err := New("muse", Config{
+		ExecutablePath: bin,
+		Logger:         slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("New(muse): %v", err)
 	}
-	c.frames <- museRead{frame: museFrame{JSONRPC: "2.0", Method: "approval/requested", Params: approvalParams}}
-	c.frames <- museRead{frame: museFrame{JSONRPC: "2.0", ID: json.RawMessage("1"), Result: json.RawMessage(`{"status":"accepted"}`)}}
-	c.frames <- museRead{frame: museFrame{JSONRPC: "2.0", ID: json.RawMessage("2"), Result: json.RawMessage(`{"status":"accepted","terminal":true}`)}}
-
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-	defer cancel()
-	if err := c.call(ctx, "turn/start", map[string]any{}, nil); err != nil {
-		t.Fatalf("outer RPC response was lost while deciding approval: %v", err)
-	}
+	return backend
 }
 
-func TestMuseDuplicateApprovalUpdateIsIgnored(t *testing.T) {
-	stdin := &museTestWriteCloser{}
-	c := &museClient{
-		stdin:  stdin,
-		frames: make(chan museRead, 1),
-	}
-	params, err := json.Marshal(map[string]any{
-		"approvalId":           "approval-1",
-		"sessionId":            "session-1",
-		"currentRequirementId": map[string]any{"approvalId": "approval-1", "sourceIndex": 2},
-		"availableChoices": []any{
-			map[string]any{"choiceId": "allow", "decision": "approvedForSession", "scope": "session"},
-		},
+func TestMuseExecuteStreamsTurn(t *testing.T) {
+	t.Parallel()
+	bin, requestsPath, argsPath := writeFakeMuseServe(t, false)
+	backend := newFakeMuseBackend(t, bin)
+
+	session, err := backend.Execute(context.Background(), "do the thing", ExecOptions{
+		Cwd:   t.TempDir(),
+		Model: "muse-wonder-full-1.0",
 	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Execute: %v", err)
 	}
-	c.frames <- museRead{frame: museFrame{JSONRPC: "2.0", ID: json.RawMessage("1"), Result: json.RawMessage(`{"status":"accepted","terminal":true}`)}}
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-	defer cancel()
-	frame := museFrame{JSONRPC: "2.0", Method: "approval/requested", Params: params}
-	if err := c.event(ctx, frame); err != nil {
-		t.Fatalf("first approval: %v", err)
+
+	var text strings.Builder
+	var toolUse, toolResult bool
+	for msg := range session.Messages {
+		switch msg.Type {
+		case MessageText:
+			text.WriteString(msg.Content)
+		case MessageToolUse:
+			toolUse = msg.Tool == "shell" && msg.CallID == "call-1"
+		case MessageToolResult:
+			toolResult = msg.Tool == "shell" && msg.CallID == "call-1" && msg.Output == "a.txt"
+		}
 	}
-	frame.Method = "approval/updated"
-	if err := c.event(ctx, frame); err != nil {
-		t.Fatalf("duplicate terminal update was decided again: %v", err)
+
+	var result Result
+	for res := range session.Result {
+		result = res
 	}
-	if got := strings.Count(stdin.String(), `"method":"approval/decide"`); got != 1 {
-		t.Fatalf("approval/decide calls = %d, want 1; wire=%s", got, stdin.String())
+
+	if result.Status != "completed" {
+		t.Fatalf("status = %q, want completed (error %q)", result.Status, result.Error)
+	}
+	if result.Output != "Muse finished" {
+		t.Fatalf("output = %q, want the final-answer text", result.Output)
+	}
+	if result.SessionID != fakeMuseSessionID {
+		t.Fatalf("session id = %q", result.SessionID)
+	}
+	if got := text.String(); got != "Muse finished" {
+		t.Fatalf("streamed text = %q, want the two deltas only", got)
+	}
+	if !toolUse {
+		t.Fatal("tool-use message did not carry tool/callId")
+	}
+	if !toolResult {
+		t.Fatal("tool-result message did not carry visibleOutput")
+	}
+	want := TokenUsage{InputTokens: 100, OutputTokens: 8, CacheReadTokens: 20}
+	if got := result.Usage["muse-wonder-full-1.0"]; got != want {
+		t.Fatalf("usage = %+v, want %+v (cache reads subtracted from input)", got, want)
+	}
+
+	argv, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read argv: %v", err)
+	}
+	if !strings.Contains(string(argv), "serve") {
+		t.Fatalf("argv = %q, want the serve subcommand", string(argv))
+	}
+	if strings.Contains(string(argv), "--yolo") {
+		t.Fatalf("argv = %q, must not pass --yolo; approval is selected on the wire", string(argv))
+	}
+
+	requests := readMuseRequests(t, requestsPath)
+	start := museRequestByMethod(requests, "session/start")
+	if start == nil {
+		t.Fatal("no session/start recorded")
+	}
+	params, _ := start["params"].(map[string]any)
+	if params["approvalMode"] != "allowAll" {
+		t.Fatalf("approvalMode = %v, want allowAll", params["approvalMode"])
+	}
+	if params["modelId"] != "muse-wonder-full-1.0" {
+		t.Fatalf("modelId = %v, want the agent's model", params["modelId"])
+	}
+	if params["workspaceRoot"] == "" {
+		t.Fatal("session/start carried no workspaceRoot")
+	}
+	commandID, _ := params["commandId"].(string)
+	if !regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(commandID) {
+		t.Fatalf("commandId %q is not a UUIDv7", commandID)
+	}
+
+	turn := museRequestByMethod(requests, "turn/start")
+	if turn == nil {
+		t.Fatal("no turn/start recorded")
+	}
+	turnParams, _ := turn["params"].(map[string]any)
+	if turnParams["sessionId"] != fakeMuseSessionID {
+		t.Fatalf("turn/start sessionId = %v", turnParams["sessionId"])
+	}
+	parts, _ := turnParams["input"].([]any)
+	if len(parts) != 1 {
+		t.Fatalf("turn/start input = %v, want one text part", turnParams["input"])
 	}
 }
 
-func TestMuseDaemonOwnsNetworkSandboxPolicy(t *testing.T) {
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	backend, err := New("muse", Config{ExecutablePath: self, Env: map[string]string{"MUSE_MSP_TEST_HELPER": "network-policy"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := backend.Execute(t.Context(), "hello\nworld", ExecOptions{
-		Cwd:        t.TempDir(),
-		CustomArgs: []string{"--sandbox-network", "restricted", "--extra"},
-		Timeout:    time.Second,
+func TestMuseExecuteReportsResumeRejection(t *testing.T) {
+	t.Parallel()
+	bin, _, _ := writeFakeMuseServe(t, true)
+	backend := newFakeMuseBackend(t, bin)
+
+	session, err := backend.Execute(context.Background(), "continue", ExecOptions{
+		Cwd:             t.TempDir(),
+		ResumeSessionID: "01a14870-0000-7000-8000-000000000000",
 	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Execute: %v", err)
 	}
-	for range s.Messages {
+	for range session.Messages {
 	}
-	if r := <-s.Result; r.Status != "completed" {
-		t.Fatalf("result=%+v", r)
+	var result Result
+	for res := range session.Result {
+		result = res
 	}
-}
-
-func TestMuseModelDiscovery(t *testing.T) {
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
+	if result.Status != "failed" {
+		t.Fatalf("status = %q, want failed", result.Status)
 	}
-	t.Setenv("MUSE_MSP_TEST_HELPER", "models")
-	catalog, err := ListModels(t.Context(), "muse", NewCommand(self, nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(catalog.Models) != 1 || catalog.Models[0].ID != "muse-test" || catalog.Models[0].Provider != "meta" || !catalog.Models[0].Default {
-		t.Fatalf("catalog=%+v", catalog)
-	}
-	if !IsKnownThinkingValue("muse", "ultra") || IsKnownThinkingValue("muse", "off") {
-		t.Fatal("incorrect MSP effort vocabulary")
+	if !result.ResumeRejected {
+		t.Fatal("a notFound resume must be reported as ResumeRejected so the daemon retries fresh")
 	}
 }
 
-func TestMuseAllowsEmptyMCPConfig(t *testing.T) {
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
+func TestMuseUUIDv7IsTimeOrdered(t *testing.T) {
+	t.Parallel()
+	first := museUUIDv7()
+	time.Sleep(2 * time.Millisecond)
+	second := museUUIDv7()
+
+	pattern := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	if !pattern.MatchString(first) || !pattern.MatchString(second) {
+		t.Fatalf("ids %q / %q are not UUIDv7", first, second)
 	}
-	backend, err := New("muse", Config{ExecutablePath: self, Env: map[string]string{"MUSE_MSP_TEST_HELPER": "success"}})
-	if err != nil {
-		t.Fatal(err)
+	if first >= second {
+		t.Fatalf("UUIDv7 ids are not time-ordered: %q then %q", first, second)
 	}
-	for _, raw := range []string{" {} ", "null", `{"mcpServers":{}}`} {
-		s, err := backend.Execute(t.Context(), "hello\nworld", ExecOptions{Cwd: t.TempDir(), McpConfig: json.RawMessage(raw), Timeout: time.Second})
-		if err != nil {
-			t.Fatalf("empty config %s: %v", raw, err)
-		}
-		for range s.Messages {
-		}
-		if r := <-s.Result; r.Status != "completed" {
-			t.Fatalf("result=%+v", r)
-		}
+}
+
+func TestMuseToolInputDecodesArguments(t *testing.T) {
+	t.Parallel()
+	decoded := museToolInput([]byte(`{"cmd":"ls","cwd":"/w"}`))
+	if decoded["cmd"] != "ls" || decoded["cwd"] != "/w" {
+		t.Fatalf("decoded = %v, want the model's argument object", decoded)
 	}
-	_, err = backend.Execute(t.Context(), "hello", ExecOptions{McpConfig: json.RawMessage(`{"mcpServers":{"test":{"command":"fake"}}}`)})
-	if err == nil {
-		t.Fatal("managed MCP was silently ignored")
+	// Muse carries args verbatim as a string. A non-object payload must still
+	// be visible on the board rather than silently dropped.
+	fallback := museToolInput([]byte(`"ls -la"`))
+	if fallback["arguments"] != "ls -la" {
+		t.Fatalf("fallback = %v, want the raw payload under arguments", fallback)
+	}
+	if museToolInput(nil) != nil {
+		t.Fatal("empty args must decode to nil, not an empty map")
+	}
+}
+
+func TestMuseModelSelectionIsRuntimeApplied(t *testing.T) {
+	t.Parallel()
+	if !ModelSelectionSupported("muse") {
+		t.Fatal("muse applies agent.model through session/start modelId")
+	}
+	if version := MinVersions["muse"]; version == "" {
+		t.Fatal("muse needs a minimum CLI version")
+	}
+	if LaunchHeader("muse") == "" {
+		t.Fatal("muse needs a launch header for the custom-args preview")
 	}
 }
